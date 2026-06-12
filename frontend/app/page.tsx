@@ -1,17 +1,51 @@
-"use client"
+"use client";
 
-import { useState } from "react"
-import { Button } from "@/components/ui/button"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { WorkoutBuilder } from "@/components/workout-builder"
-import { ExerciseLibrary } from "@/components/exercise-library"
-import { ProgressDashboard } from "@/components/progress-dashboard"
-import { WorkoutTimer } from "@/components/workout-timer"
-import { ThemeToggle } from "@/components/theme-toggle"
-import { Dumbbell, Target, TrendingUp, Timer } from "lucide-react"
+import { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
+import { Button } from "@/components/ui/button";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { WorkoutBuilder } from "@/components/workout-builder";
+import { ExerciseLibrary } from "@/components/exercise-library";
+import { ProgressDashboard } from "@/components/progress-dashboard";
+import { WorkoutTimer } from "@/components/workout-timer";
+import { ThemeToggle } from "@/components/theme-toggle";
+import {
+  Dumbbell,
+  Target,
+  TrendingUp,
+  Timer,
+  LogOut,
+  Loader2,
+} from "lucide-react";
+import { useAuth } from "@/lib/auth-context";
 
 export default function FitnessApp() {
-  const [activeTab, setActiveTab] = useState("dashboard")
+  const router = useRouter();
+  const { user, logout, loading } = useAuth();
+  const [activeTab, setActiveTab] = useState("dashboard");
+
+  useEffect(() => {
+    if (!loading && !user) {
+      router.push("/login");
+    }
+  }, [user, loading, router]);
+
+  const handleLogout = () => {
+    logout();
+    router.push("/login");
+  };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-background">
+        <Loader2 className="h-8 w-8 animate-spin text-primary" />
+      </div>
+    );
+  }
+
+  if (!user) {
+    return null;
+  }
 
   return (
     <div className="min-h-screen bg-background transition-colors duration-300">
@@ -24,14 +58,24 @@ export default function FitnessApp() {
                 <Dumbbell className="h-7 w-7 text-primary-foreground" />
               </div>
               <div>
-                <h1 className="text-2xl font-bold text-foreground">FitTracker Pro</h1>
-                <p className="text-sm text-muted-foreground">Transform your fitness journey</p>
+                <h1 className="text-2xl font-bold text-foreground">
+                  FitTracker Pro
+                </h1>
+                <p className="text-sm text-muted-foreground">
+                  Welcome back, {user.name}!
+                </p>
               </div>
             </div>
             <div className="flex items-center gap-3">
               <ThemeToggle />
-              <Button variant="outline" size="sm"  className="hover:bg-primary hover:text-primary-foreground">
-                Profile
+              <Button
+                variant="outline"
+                size="sm"
+                className="hover:bg-red-500 hover:text-white"
+                onClick={handleLogout}
+              >
+                <LogOut className="h-4 w-4 mr-2" />
+                Logout
               </Button>
             </div>
           </div>
@@ -90,5 +134,5 @@ export default function FitnessApp() {
         </Tabs>
       </main>
     </div>
-  )
+  );
 }
