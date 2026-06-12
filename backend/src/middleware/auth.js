@@ -1,5 +1,5 @@
 import jwt from "jsonwebtoken";
-import User from "../models/User.js";
+import prisma from "../lib/prisma.js";
 
 /**
  * Generate JWT token
@@ -53,7 +53,9 @@ export const protect = async (req, res, next) => {
       const decoded = verifyToken(token);
 
       // Get user from token
-      req.user = await User.findById(decoded.id).select("-password");
+      req.user = await prisma.user.findUnique({
+        where: { id: decoded.id },
+      });
 
       if (!req.user) {
         return res.status(401).json({

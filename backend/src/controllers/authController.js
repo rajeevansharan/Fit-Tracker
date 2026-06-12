@@ -4,7 +4,8 @@ import {
   errorResponse,
 } from "../utils/helpers.js";
 import { generateToken } from "../middleware/auth.js";
-import User from "../models/User.js";
+import prisma from "../lib/prisma.js";
+import bcrypt from "bcryptjs";
 
 /**
  * @desc    Register new user
@@ -15,27 +16,33 @@ export const register = asyncHandler(async (req, res) => {
   const { name, email, password } = req.body;
 
   // Check if user already exists
-  const userExists = await User.findOne({ email });
+  const userExists = await prisma.user.findUnique({ where: { email } });
   if (userExists) {
     return errorResponse(res, 400, "User already exists with this email");
   }
 
+  // Hash password
+  const salt = await bcrypt.genSalt(10);
+  const hashedPassword = await bcrypt.hash(password, salt);
+
   // Create user
-  const user = await User.create({
-    name,
-    email,
-    password,
+  const user = await prisma.user.create({
+    data: {
+      name,
+      email,
+      password: hashedPassword,
+    },
   });
 
   // Generate token
-  const token = generateToken(user._id);
+  const token = generateToken(user.id);
 
   successResponse(
     res,
     201,
     {
       user: {
-        id: user._id,
+        id: user.id,
         name: user.name,
         email: user.email,
         role: user.role,
@@ -59,15 +66,15 @@ export const login = asyncHandler(async (req, res) => {
     return errorResponse(res, 400, "Please provide email and password");
   }
 
-  // Check for user (include password field)
-  const user = await User.findOne({ email }).select("+password");
+  // Check for user
+  const user = await prisma.user.findUnique({ where: { email } });
 
   if (!user) {
     return errorResponse(res, 401, "Invalid credentials");
   }
 
   // Check if password matches
-  const isMatch = await user.comparePassword(password);
+  const isMatch = await bcrypt.compare(password, user.password);
 
   if (!isMatch) {
     return errorResponse(res, 401, "Invalid credentials");
@@ -79,14 +86,14 @@ export const login = asyncHandler(async (req, res) => {
   }
 
   // Generate token
-  const token = generateToken(user._id);
+  const token = generateToken(user.id);
 
   successResponse(
     res,
     200,
     {
       user: {
-        id: user._id,
+        id: user.id,
         name: user.name,
         email: user.email,
         role: user.role,
@@ -105,7 +112,14 @@ export const login = asyncHandler(async (req, res) => {
  * @access  Private
  */
 export const getMe = asyncHandler(async (req, res) => {
-  const user = await User.findById(req.user._id);
+  const user = await prisma.user.findUnique({
+    where: { id: req.user.id }
+  });
+
+  // Remove password from response
+  if (user) {
+    delete user.password;
+  }
 
   successResponse(res, 200, { user }, "User profile retrieved");
 });
@@ -116,22 +130,20 @@ export const getMe = asyncHandler(async (req, res) => {
  * @access  Private
  */
 export const updateProfile = asyncHandler(async (req, res) => {
-  const fieldsToUpdate = {
-    name: req.body.name,
-    email: req.body.email,
-    avatar: req.body.avatar,
-    preferences: req.body.preferences,
-  };
+  const { name, email, avatar, preferences } = req.body;
 
-  // Remove undefined fields
-  Object.keys(fieldsToUpdate).forEach(
-    (key) => fieldsToUpdate[key] === undefined && delete fieldsToUpdate[key]
-  );
+  const dataToUpdate = {};
+  if (name !== undefined) dataToUpdate.name = name;
+  if (email !== undefined) dataToUpdate.email = email;
+  if (avatar !== undefined) dataToUpdate.avatar = avatar;
+  if (preferences !== undefined) dataToUpdate.preferences = preferences;
 
-  const user = await User.findByIdAndUpdate(req.user._id, fieldsToUpdate, {
-    new: true,
-    runValidators: true,
+  const user = await prisma.user.update({
+    where: { id: req.user.id },
+    data: dataToUpdate,
   });
+
+  delete user.password;
 
   successResponse(res, 200, { user }, "Profile updated successfully");
 });
@@ -148,20 +160,28 @@ export const updatePassword = asyncHandler(async (req, res) => {
     return errorResponse(res, 400, "Please provide current and new password");
   }
 
-  const user = await User.findById(req.user._id).select("+password");
+  const user = await prisma.user.findUnique({
+    where: { id: req.user.id }
+  });
 
   // Check current password
-  const isMatch = await user.comparePassword(currentPassword);
+  const isMatch = await bcrypt.compare(currentPassword, user.password);
 
   if (!isMatch) {
     return errorResponse(res, 401, "Current password is incorrect");
   }
 
-  // Update password
-  user.password = newPassword;
-  await user.save();
+  // Hash new password
+  const salt = await bcrypt.genSalt(10);
+  const hashedPassword = await bcrypt.hash(newPassword, salt);
 
-  const token = generateToken(user._id);
+  // Update password
+  await prisma.user.update({
+    where: { id: req.user.id },
+    data: { password: hashedPassword },
+  });
+
+  const token = generateToken(user.id);
 
   successResponse(res, 200, { token }, "Password updated successfully");
 });

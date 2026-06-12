@@ -5,10 +5,40 @@ import {
   paginate,
   calculateStreak,
 } from "../utils/helpers.js";
-import WorkoutSession from "../models/WorkoutSession.js";
-import Workout from "../models/Workout.js";
-import User from "../models/User.js";
-import Progress from "../models/Progress.js";
+import prisma from "../lib/prisma.js";
+
+/**
+ * Helper to calculate session totals
+ */
+const calculateSessionTotals = (exercises) => {
+  let totalVolume = 0;
+  let totalSets = 0;
+  let totalReps = 0;
+
+  const processedExercises = exercises.map((exercise) => {
+    let exerciseVolume = 0;
+    exercise.sets.forEach((set) => {
+      if (set.completed) {
+        exerciseVolume += (set.reps || 0) * (set.weight || 0);
+        totalSets += 1;
+        totalReps += (set.reps || 0);
+      }
+    });
+    return {
+      ...exercise,
+      totalVolume: exerciseVolume,
+    };
+  });
+
+  totalVolume = processedExercises.reduce((sum, ex) => sum + ex.totalVolume, 0);
+
+  return {
+    processedExercises,
+    totalVolume,
+    totalSets,
+    totalReps,
+  };
+};
 
 /**
  * @desc    Get all workout sessions for user
@@ -18,25 +48,35 @@ import Progress from "../models/Progress.js";
 export const getSessions = asyncHandler(async (req, res) => {
   const { page, limit, status, startDate, endDate } = req.query;
 
-  const query = { userId: req.user._id };
+  const where = { userId: req.user.id };
 
   // Filter by status
   if (status) {
-    query.status = status;
+    where.status = status;
   }
 
   // Filter by date range
   if (startDate || endDate) {
-    query.startTime = {};
-    if (startDate) query.startTime.$gte = new Date(startDate);
-    if (endDate) query.startTime.$lte = new Date(endDate);
+    where.startTime = {};
+    if (startDate) where.startTime.gte = new Date(startDate);
+    if (endDate) where.startTime.lte = new Date(endDate);
   }
 
-  const result = await paginate(WorkoutSession, query, {
+  const result = await paginate(prisma.workoutSession, {
+    where,
+    include: {
+      workout: true,
+      exercises: {
+        include: {
+          sets: true,
+        },
+        orderBy: { order: 'asc' }
+      },
+    },
+    orderBy: { startTime: 'desc' },
+  }, {
     page,
     limit,
-    sort: "-startTime",
-    populate: "workoutId exercises.exerciseId",
   });
 
   res.status(200).json(result);
@@ -48,16 +88,25 @@ export const getSessions = asyncHandler(async (req, res) => {
  * @access  Private
  */
 export const getSession = asyncHandler(async (req, res) => {
-  const session = await WorkoutSession.findById(req.params.id)
-    .populate("workoutId")
-    .populate("exercises.exerciseId");
+  const session = await prisma.workoutSession.findUnique({
+    where: { id: req.params.id },
+    include: {
+      workout: true,
+      exercises: {
+        include: {
+          sets: true,
+        },
+        orderBy: { order: 'asc' }
+      },
+    }
+  });
 
   if (!session) {
     return errorResponse(res, 404, "Workout session not found");
   }
 
   // Check ownership
-  if (session.userId.toString() !== req.user._id.toString()) {
+  if (session.userId !== req.user.id) {
     return errorResponse(res, 403, "Not authorized to access this session");
   }
 
@@ -75,35 +124,58 @@ export const startSession = asyncHandler(async (req, res) => {
   // If workoutId provided, get workout details
   let workout = null;
   if (workoutId) {
-    workout = await Workout.findById(workoutId);
+    workout = await prisma.workout.findUnique({
+      where: { id: workoutId },
+      include: { exercises: true }
+    });
     if (!workout) {
       return errorResponse(res, 404, "Workout not found");
     }
   }
 
-  const sessionData = {
-    userId: req.user._id,
-    workoutId: workoutId || null,
-    workoutName: workoutName || workout?.name || "Quick Workout",
-    exercises:
-      exercises ||
-      workout?.exercises.map((ex, index) => ({
-        exerciseId: ex.exerciseId,
-        name: ex.name,
-        sets: Array.from({ length: ex.sets }, (_, i) => ({
-          setNumber: i + 1,
-          reps: ex.reps,
-          weight: ex.weight,
-          completed: false,
-        })),
-        order: index + 1,
-      })) ||
-      [],
-    startTime: new Date(),
-    status: "in-progress",
-  };
+  const sessionExercisesData = exercises || workout?.exercises.map((ex, index) => ({
+    exerciseId: ex.exerciseId,
+    name: ex.name,
+    order: index + 1,
+    sets: Array.from({ length: ex.sets }, (_, i) => ({
+      setNumber: i + 1,
+      reps: ex.reps,
+      weight: ex.weight,
+      completed: false,
+    })),
+  })) || [];
 
-  const session = await WorkoutSession.create(sessionData);
+  const session = await prisma.workoutSession.create({
+    data: {
+      userId: req.user.id,
+      workoutId: workoutId || null,
+      workoutName: workoutName || workout?.name || "Quick Workout",
+      startTime: new Date(),
+      status: "in_progress",
+      exercises: {
+        create: sessionExercisesData.map(ex => ({
+          exerciseId: ex.exerciseId,
+          name: ex.name,
+          order: ex.order,
+          sets: {
+            create: ex.sets.map(s => ({
+              setNumber: s.setNumber,
+              reps: s.reps,
+              weight: s.weight,
+              completed: s.completed || false,
+            }))
+          }
+        }))
+      }
+    },
+    include: {
+      exercises: {
+        include: {
+          sets: true
+        }
+      }
+    }
+  });
 
   successResponse(res, 201, { session }, "Workout session started");
 });
@@ -114,21 +186,80 @@ export const startSession = asyncHandler(async (req, res) => {
  * @access  Private
  */
 export const updateSession = asyncHandler(async (req, res) => {
-  let session = await WorkoutSession.findById(req.params.id);
+  let session = await prisma.workoutSession.findUnique({
+    where: { id: req.params.id },
+    include: { exercises: { include: { sets: true } } }
+  });
 
   if (!session) {
     return errorResponse(res, 404, "Workout session not found");
   }
 
   // Check ownership
-  if (session.userId.toString() !== req.user._id.toString()) {
+  if (session.userId !== req.user.id) {
     return errorResponse(res, 403, "Not authorized to update this session");
   }
 
-  session = await WorkoutSession.findByIdAndUpdate(req.params.id, req.body, {
-    new: true,
-    runValidators: true,
-  });
+  const { exercises, ...otherData } = req.body;
+
+  if (exercises) {
+    const { totalVolume, totalSets, totalReps } = calculateSessionTotals(exercises);
+
+    session = await prisma.$transaction(async (tx) => {
+      // Clean up existing nested relations to simplify update
+      await tx.sessionSet.deleteMany({
+        where: { exercise: { sessionId: req.params.id } }
+      });
+      await tx.sessionExercise.deleteMany({
+        where: { sessionId: req.params.id }
+      });
+
+      return await tx.workoutSession.update({
+        where: { id: req.params.id },
+        data: {
+          ...otherData,
+          totalVolume,
+          totalSets,
+          totalReps,
+          exercises: {
+            create: exercises.map(ex => ({
+              exerciseId: ex.exerciseId,
+              name: ex.name,
+              order: ex.order,
+              totalVolume: ex.totalVolume || 0,
+              sets: {
+                create: ex.sets.map(s => ({
+                  setNumber: s.setNumber,
+                  reps: s.reps,
+                  weight: s.weight,
+                  completed: s.completed || false,
+                }))
+              }
+            }))
+          }
+        },
+        include: {
+          exercises: {
+            include: {
+              sets: true
+            }
+          }
+        }
+      });
+    });
+  } else {
+    session = await prisma.workoutSession.update({
+      where: { id: req.params.id },
+      data: otherData,
+      include: {
+        exercises: {
+          include: {
+            sets: true
+          }
+        }
+      }
+    });
+  }
 
   successResponse(res, 200, { session }, "Session updated");
 });
@@ -139,53 +270,85 @@ export const updateSession = asyncHandler(async (req, res) => {
  * @access  Private
  */
 export const completeSession = asyncHandler(async (req, res) => {
-  const session = await WorkoutSession.findById(req.params.id);
+  let session = await prisma.workoutSession.findUnique({
+    where: { id: req.params.id },
+    include: { exercises: { include: { sets: true } } }
+  });
 
   if (!session) {
     return errorResponse(res, 404, "Workout session not found");
   }
 
   // Check ownership
-  if (session.userId.toString() !== req.user._id.toString()) {
+  if (session.userId !== req.user.id) {
     return errorResponse(res, 403, "Not authorized to complete this session");
   }
 
-  // Update session
-  session.endTime = new Date();
-  session.status = "completed";
-  session.rating = req.body.rating || null;
-  session.notes = req.body.notes || session.notes;
+  const endTime = new Date();
+  const startTime = new Date(session.startTime);
+  const duration = Math.floor((endTime - startTime) / 1000);
 
-  await session.save();
+  // Re-calculate totals just in case
+  const { totalVolume, totalSets, totalReps } = calculateSessionTotals(session.exercises);
+
+  // Update session
+  session = await prisma.workoutSession.update({
+    where: { id: req.params.id },
+    data: {
+      endTime,
+      duration,
+      status: "completed",
+      rating: req.body.rating || null,
+      notes: req.body.notes || session.notes,
+      totalVolume,
+      totalSets,
+      totalReps,
+    },
+    include: { exercises: true }
+  });
 
   // Update user stats
-  const user = await User.findById(req.user._id);
-  user.stats.totalWorkouts += 1;
-  user.stats.totalWeightLifted += session.totalVolume;
-  user.lastWorkoutDate = new Date();
+  const user = await prisma.user.findUnique({
+    where: { id: req.user.id }
+  });
+
+  const updatedStats = { ...(typeof user.stats === 'string' ? JSON.parse(user.stats) : user.stats) };
+  updatedStats.totalWorkouts += 1;
+  updatedStats.totalWeightLifted += totalVolume;
 
   // Update streak
-  const completedSessions = await WorkoutSession.find({
-    userId: req.user._id,
-    status: "completed",
-  })
-    .select("startTime")
-    .sort("-startTime");
+  const completedSessions = await prisma.workoutSession.findMany({
+    where: {
+      userId: req.user.id,
+      status: "completed",
+    },
+    select: { startTime: true },
+    orderBy: { startTime: 'desc' },
+  });
 
   const workoutDates = completedSessions.map((s) => s.startTime);
-  user.stats.currentStreak = calculateStreak(workoutDates);
+  updatedStats.currentStreak = calculateStreak(workoutDates);
 
-  if (user.stats.currentStreak > user.stats.longestStreak) {
-    user.stats.longestStreak = user.stats.currentStreak;
+  if (updatedStats.currentStreak > updatedStats.longestStreak) {
+    updatedStats.longestStreak = updatedStats.currentStreak;
   }
 
-  await user.save();
+  await prisma.user.update({
+    where: { id: req.user.id },
+    data: {
+      stats: updatedStats,
+      lastWorkoutDate: new Date(),
+    }
+  });
 
   // Update workout if it was based on a template
   if (session.workoutId) {
-    await Workout.findByIdAndUpdate(session.workoutId, {
-      $inc: { timesCompleted: 1 },
-      lastPerformed: new Date(),
+    await prisma.workout.update({
+      where: { id: session.workoutId },
+      data: {
+        timesCompleted: { increment: 1 },
+        lastPerformed: new Date(),
+      }
     });
   }
 
@@ -198,22 +361,28 @@ export const completeSession = asyncHandler(async (req, res) => {
  * @access  Private
  */
 export const cancelSession = asyncHandler(async (req, res) => {
-  const session = await WorkoutSession.findById(req.params.id);
+  const session = await prisma.workoutSession.findUnique({
+    where: { id: req.params.id }
+  });
 
   if (!session) {
     return errorResponse(res, 404, "Workout session not found");
   }
 
   // Check ownership
-  if (session.userId.toString() !== req.user._id.toString()) {
+  if (session.userId !== req.user.id) {
     return errorResponse(res, 403, "Not authorized to cancel this session");
   }
 
-  session.status = "cancelled";
-  session.endTime = new Date();
-  await session.save();
+  const updatedSession = await prisma.workoutSession.update({
+    where: { id: req.params.id },
+    data: {
+      status: "cancelled",
+      endTime: new Date(),
+    }
+  });
 
-  successResponse(res, 200, { session }, "Workout session cancelled");
+  successResponse(res, 200, { session: updatedSession }, "Workout session cancelled");
 });
 
 /**
@@ -222,18 +391,22 @@ export const cancelSession = asyncHandler(async (req, res) => {
  * @access  Private
  */
 export const deleteSession = asyncHandler(async (req, res) => {
-  const session = await WorkoutSession.findById(req.params.id);
+  const session = await prisma.workoutSession.findUnique({
+    where: { id: req.params.id }
+  });
 
   if (!session) {
     return errorResponse(res, 404, "Workout session not found");
   }
 
   // Check ownership
-  if (session.userId.toString() !== req.user._id.toString()) {
+  if (session.userId !== req.user.id) {
     return errorResponse(res, 403, "Not authorized to delete this session");
   }
 
-  await session.deleteOne();
+  await prisma.workoutSession.delete({
+    where: { id: req.params.id }
+  });
 
   successResponse(res, 200, {}, "Session deleted successfully");
 });
@@ -258,10 +431,12 @@ export const getWorkoutStats = asyncHandler(async (req, res) => {
     startDate.setFullYear(startDate.getFullYear() - 1);
   }
 
-  const sessions = await WorkoutSession.find({
-    userId: req.user._id,
-    status: "completed",
-    startTime: { $gte: startDate, $lte: endDate },
+  const sessions = await prisma.workoutSession.findMany({
+    where: {
+      userId: req.user.id,
+      status: "completed",
+      startTime: { gte: startDate, lte: endDate },
+    },
   });
 
   const stats = {
@@ -271,8 +446,8 @@ export const getWorkoutStats = asyncHandler(async (req, res) => {
     averageDuration:
       sessions.length > 0
         ? Math.round(
-            sessions.reduce((sum, s) => sum + s.duration, 0) / sessions.length
-          )
+          sessions.reduce((sum, s) => sum + s.duration, 0) / sessions.length
+        )
         : 0,
     weeklyData: [],
   };

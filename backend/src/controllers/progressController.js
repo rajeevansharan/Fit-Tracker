@@ -4,8 +4,7 @@ import {
   errorResponse,
   paginate,
 } from "../utils/helpers.js";
-import Progress from "../models/Progress.js";
-import WorkoutSession from "../models/WorkoutSession.js";
+import prisma from "../lib/prisma.js";
 
 /**
  * @desc    Get all progress entries for user
@@ -15,19 +14,21 @@ import WorkoutSession from "../models/WorkoutSession.js";
 export const getProgressEntries = asyncHandler(async (req, res) => {
   const { page, limit, startDate, endDate } = req.query;
 
-  const query = { userId: req.user._id };
+  const where = { userId: req.user.id };
 
   // Filter by date range
   if (startDate || endDate) {
-    query.date = {};
-    if (startDate) query.date.$gte = new Date(startDate);
-    if (endDate) query.date.$lte = new Date(endDate);
+    where.date = {};
+    if (startDate) where.date.gte = new Date(startDate);
+    if (endDate) where.date.lte = new Date(endDate);
   }
 
-  const result = await paginate(Progress, query, {
+  const result = await paginate(prisma.progress, {
+    where,
+    orderBy: { date: 'desc' },
+  }, {
     page,
     limit,
-    sort: "-date",
   });
 
   res.status(200).json(result);
@@ -39,14 +40,16 @@ export const getProgressEntries = asyncHandler(async (req, res) => {
  * @access  Private
  */
 export const getProgressEntry = asyncHandler(async (req, res) => {
-  const progress = await Progress.findById(req.params.id);
+  const progress = await prisma.progress.findUnique({
+    where: { id: req.params.id }
+  });
 
   if (!progress) {
     return errorResponse(res, 404, "Progress entry not found");
   }
 
   // Check ownership
-  if (progress.userId.toString() !== req.user._id.toString()) {
+  if (progress.userId !== req.user.id) {
     return errorResponse(
       res,
       403,
@@ -63,12 +66,13 @@ export const getProgressEntry = asyncHandler(async (req, res) => {
  * @access  Private
  */
 export const createProgressEntry = asyncHandler(async (req, res) => {
-  const progressData = {
-    ...req.body,
-    userId: req.user._id,
-  };
-
-  const progress = await Progress.create(progressData);
+  const progress = await prisma.progress.create({
+    data: {
+      ...req.body,
+      userId: req.user.id,
+      date: req.body.date ? new Date(req.body.date) : new Date(),
+    },
+  });
 
   successResponse(
     res,
@@ -84,14 +88,16 @@ export const createProgressEntry = asyncHandler(async (req, res) => {
  * @access  Private
  */
 export const updateProgressEntry = asyncHandler(async (req, res) => {
-  let progress = await Progress.findById(req.params.id);
+  let progress = await prisma.progress.findUnique({
+    where: { id: req.params.id }
+  });
 
   if (!progress) {
     return errorResponse(res, 404, "Progress entry not found");
   }
 
   // Check ownership
-  if (progress.userId.toString() !== req.user._id.toString()) {
+  if (progress.userId !== req.user.id) {
     return errorResponse(
       res,
       403,
@@ -99,9 +105,12 @@ export const updateProgressEntry = asyncHandler(async (req, res) => {
     );
   }
 
-  progress = await Progress.findByIdAndUpdate(req.params.id, req.body, {
-    new: true,
-    runValidators: true,
+  const updateData = { ...req.body };
+  if (updateData.date) updateData.date = new Date(updateData.date);
+
+  progress = await prisma.progress.update({
+    where: { id: req.params.id },
+    data: updateData,
   });
 
   successResponse(
@@ -118,14 +127,16 @@ export const updateProgressEntry = asyncHandler(async (req, res) => {
  * @access  Private
  */
 export const deleteProgressEntry = asyncHandler(async (req, res) => {
-  const progress = await Progress.findById(req.params.id);
+  const progress = await prisma.progress.findUnique({
+    where: { id: req.params.id }
+  });
 
   if (!progress) {
     return errorResponse(res, 404, "Progress entry not found");
   }
 
   // Check ownership
-  if (progress.userId.toString() !== req.user._id.toString()) {
+  if (progress.userId !== req.user.id) {
     return errorResponse(
       res,
       403,
@@ -133,7 +144,9 @@ export const deleteProgressEntry = asyncHandler(async (req, res) => {
     );
   }
 
-  await progress.deleteOne();
+  await prisma.progress.delete({
+    where: { id: req.params.id }
+  });
 
   successResponse(res, 200, {}, "Progress entry deleted successfully");
 });
@@ -161,17 +174,23 @@ export const getProgressDashboard = asyncHandler(async (req, res) => {
   }
 
   // Get workout sessions for the period
-  const sessions = await WorkoutSession.find({
-    userId: req.user._id,
-    status: "completed",
-    startTime: { $gte: startDate, $lte: endDate },
-  }).sort("startTime");
+  const sessions = await prisma.workoutSession.findMany({
+    where: {
+      userId: req.user.id,
+      status: "completed",
+      startTime: { gte: startDate, lte: endDate },
+    },
+    orderBy: { startTime: 'asc' },
+  });
 
   // Get progress entries
-  const progressEntries = await Progress.find({
-    userId: req.user._id,
-    date: { $gte: startDate, $lte: endDate },
-  }).sort("date");
+  const progressEntries = await prisma.progress.findMany({
+    where: {
+      userId: req.user.id,
+      date: { gte: startDate, lte: endDate },
+    },
+    orderBy: { date: 'asc' },
+  });
 
   // Aggregate data by week
   const weeklyData = [];
@@ -204,45 +223,46 @@ export const getProgressDashboard = asyncHandler(async (req, res) => {
     ...Array.from(weekMap.values()).sort((a, b) => a.date - b.date)
   );
 
-  // Get exercise records
-  const exerciseStats = await WorkoutSession.aggregate([
-    {
-      $match: {
-        userId: req.user._id,
-        status: "completed",
-      },
+  // Get exercise records manually since Prisma aggregate is complex with nested relations
+  const allCompletedSessions = await prisma.workoutSession.findMany({
+    where: {
+      userId: req.user.id,
+      status: "completed",
     },
-    {
-      $unwind: "$exercises",
-    },
-    {
-      $unwind: "$exercises.sets",
-    },
-    {
-      $match: {
-        "exercises.sets.completed": true,
-      },
-    },
-    {
-      $group: {
-        _id: "$exercises.exerciseId",
-        exerciseName: { $first: "$exercises.name" },
-        maxWeight: { $max: "$exercises.sets.weight" },
-        maxReps: { $max: "$exercises.sets.reps" },
-        totalVolume: {
-          $sum: {
-            $multiply: ["$exercises.sets.weight", "$exercises.sets.reps"],
-          },
-        },
-      },
-    },
-    {
-      $sort: { maxWeight: -1 },
-    },
-    {
-      $limit: 10,
-    },
-  ]);
+    include: {
+      exercises: {
+        include: {
+          sets: {
+            where: { completed: true }
+          }
+        }
+      }
+    }
+  });
+
+  const exerciseMap = new Map();
+  allCompletedSessions.forEach(session => {
+    session.exercises.forEach(ex => {
+      if (!exerciseMap.has(ex.exerciseId)) {
+        exerciseMap.set(ex.exerciseId, {
+          exerciseName: ex.name,
+          maxWeight: 0,
+          maxReps: 0,
+          totalVolume: 0
+        });
+      }
+      const stats = exerciseMap.get(ex.exerciseId);
+      ex.sets.forEach(set => {
+        if (set.weight > stats.maxWeight) stats.maxWeight = set.weight;
+        if (set.reps > stats.maxReps) stats.maxReps = set.reps;
+        stats.totalVolume += (set.weight * set.reps);
+      });
+    });
+  });
+
+  const exerciseStats = Array.from(exerciseMap.values())
+    .sort((a, b) => b.maxWeight - a.maxWeight)
+    .slice(0, 10);
 
   const dashboardData = {
     weeklyData,
@@ -254,8 +274,8 @@ export const getProgressDashboard = asyncHandler(async (req, res) => {
       averageDuration:
         sessions.length > 0
           ? Math.round(
-              sessions.reduce((sum, s) => sum + s.duration, 0) / sessions.length
-            )
+            sessions.reduce((sum, s) => sum + s.duration, 0) / sessions.length
+          )
           : 0,
     },
   };
@@ -287,13 +307,20 @@ export const getWeightHistory = asyncHandler(async (req, res) => {
     startDate.setFullYear(startDate.getFullYear() - 1);
   }
 
-  const weightHistory = await Progress.find({
-    userId: req.user._id,
-    date: { $gte: startDate, $lte: endDate },
-    bodyWeight: { $ne: null },
-  })
-    .select("date bodyWeight bodyFat muscleMass")
-    .sort("date");
+  const weightHistory = await prisma.progress.findMany({
+    where: {
+      userId: req.user.id,
+      date: { gte: startDate, lte: endDate },
+      bodyWeight: { not: null },
+    },
+    select: {
+      date: true,
+      bodyWeight: true,
+      bodyFat: true,
+      muscleMass: true,
+    },
+    orderBy: { date: 'asc' },
+  });
 
   successResponse(res, 200, { weightHistory }, "Weight history retrieved");
 });

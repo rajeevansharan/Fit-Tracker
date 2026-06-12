@@ -1,0 +1,196 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  user
+  admin
+}
+
+enum Category {
+  Strength
+  Cardio
+  Flexibility
+  Core
+  Sports
+  Other
+}
+
+enum WorkoutCategory {
+  Strength
+  Cardio
+  Flexibility
+  Sports
+  Custom
+}
+
+enum Difficulty {
+  Beginner
+  Intermediate
+  Advanced
+}
+
+enum SessionStatus {
+  in_progress @map("in-progress")
+  completed
+  cancelled
+}
+
+model User {
+  id               String           @id @default(uuid())
+  name             String
+  email            String           @unique
+  password         String
+  avatar           String?          @default("")
+  role             Role             @default(user)
+  preferences      Json?            @default("{\"theme\": \"system\", \"units\": {\"weight\": \"lbs\", \"distance\": \"miles\"}, \"notifications\": {\"email\": true, \"push\": true}}")
+  stats            Json?            @default("{\"totalWorkouts\": 0, \"currentStreak\": 0, \"longestStreak\": 0, \"totalWeightLifted\": 0, \"personalRecords\": 0}")
+  lastWorkoutDate  DateTime?
+  isActive         Boolean          @default(true)
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+  exercises        Exercise[]
+  workouts         Workout[]
+  workoutSessions  WorkoutSession[]
+  progressRecords  Progress[]
+
+  @@index([email])
+}
+
+model Exercise {
+  id               String           @id @default(uuid())
+  name             String           @unique
+  description      String?          @default("")
+  category         Category
+  muscle           String
+  secondaryMuscles String[]
+  equipment        String
+  difficulty       Difficulty       @default(Intermediate)
+  instructions     String[]
+  tips             String[]
+  videoUrl         String?          @default("")
+  imageUrl         String?          @default("")
+  isCustom         Boolean          @default(false)
+  createdBy        User?            @relation(fields: [userId], references: [id])
+  userId           String?
+  usageCount       Int              @default(0)
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+  workoutExercises WorkoutExercise[]
+  sessionExercises SessionExercise[]
+}
+
+model Workout {
+  id                String           @id @default(uuid())
+  user              User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId            String
+  name              String
+  description       String?          @default("")
+  category          WorkoutCategory  @default(Custom)
+  difficulty        Difficulty       @default(Intermediate)
+  estimatedDuration Int              @default(60)
+  tags              String[]
+  isTemplate        Boolean          @default(false)
+  isPublic          Boolean          @default(false)
+  timesCompleted    Int              @default(0)
+  lastPerformed     DateTime?
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  exercises         WorkoutExercise[]
+  sessions          WorkoutSession[]
+
+  @@index([userId, createdAt(sort: Desc)])
+}
+
+model WorkoutExercise {
+  id         String   @id @default(uuid())
+  workout    Workout  @relation(fields: [workoutId], references: [id], onDelete: Cascade)
+  workoutId  String
+  exercise   Exercise @relation(fields: [exerciseId], references: [id])
+  exerciseId String
+  name       String
+  sets       Int
+  reps       Int
+  weight     Float    @default(0)
+  restTime   Int      @default(60)
+  notes      String?  @default("")
+  order      Int
+}
+
+model WorkoutSession {
+  id              String           @id @default(uuid())
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId          String
+  workout         Workout?         @relation(fields: [workoutId], references: [id])
+  workoutId       String?
+  workoutName     String
+  startTime       DateTime         @default(now())
+  endTime         DateTime?
+  duration        Int              @default(0)
+  status          SessionStatus    @default(in_progress)
+  totalVolume     Float            @default(0)
+  totalSets       Int              @default(0)
+  totalReps       Int              @default(0)
+  notes           String?          @default("")
+  personalRecords Json?            @default("[]")
+  rating          Int?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  exercises       SessionExercise[]
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([workoutId])
+  @@index([status])
+}
+
+model SessionExercise {
+  id               String         @id @default(uuid())
+  session          WorkoutSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  sessionId        String
+  exercise         Exercise       @relation(fields: [exerciseId], references: [id])
+  exerciseId       String
+  name             String
+  totalVolume      Float          @default(0)
+  notes            String?        @default("")
+  order            Int
+  sets             SessionSet[]
+}
+
+model SessionSet {
+  id                String          @id @default(uuid())
+  exercise          SessionExercise @relation(fields: [sessionExerciseId], references: [id], onDelete: Cascade)
+  sessionExerciseId String
+  setNumber         Int
+  reps              Int
+  weight            Float           @default(0)
+  completed         Boolean         @default(false)
+  notes             String?         @default("")
+}
+
+model Progress {
+  id              String   @id @default(uuid())
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId          String
+  date            DateTime @default(now())
+  bodyWeight      Float?
+  bodyFat         Float?
+  muscleMass      Float?
+  measurements    Json?    @default("{}")
+  exerciseRecords Json?    @default("[]")
+  workoutStats    Json?    @default("{}")
+  notes           String?  @default("")
+  photos          Json?    @default("[]")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([userId, date])
+  @@index([userId, date(sort: Desc)])
+}

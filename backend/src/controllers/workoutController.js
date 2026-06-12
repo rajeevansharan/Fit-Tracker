@@ -4,7 +4,7 @@ import {
   errorResponse,
   paginate,
 } from "../utils/helpers.js";
-import Workout from "../models/Workout.js";
+import prisma from "../lib/prisma.js";
 
 /**
  * @desc    Get all workouts for logged in user
@@ -14,23 +14,34 @@ import Workout from "../models/Workout.js";
 export const getWorkouts = asyncHandler(async (req, res) => {
   const { page, limit, category, search } = req.query;
 
-  const query = { userId: req.user._id };
+  const where = { userId: req.user.id };
 
   // Filter by category
   if (category) {
-    query.category = category;
+    where.category = category;
   }
 
-  // Text search
+  // Search
   if (search) {
-    query.$text = { $search: search };
+    where.OR = [
+      { name: { contains: search, mode: 'insensitive' } },
+      { description: { contains: search, mode: 'insensitive' } },
+    ];
   }
 
-  const result = await paginate(Workout, query, {
+  const result = await paginate(prisma.workout, {
+    where,
+    include: {
+      exercises: {
+        include: {
+          exercise: true
+        }
+      }
+    },
+    orderBy: { createdAt: 'desc' },
+  }, {
     page,
     limit,
-    sort: "-createdAt",
-    populate: "exercises.exerciseId",
   });
 
   res.status(200).json(result);
@@ -42,9 +53,17 @@ export const getWorkouts = asyncHandler(async (req, res) => {
  * @access  Private
  */
 export const getWorkout = asyncHandler(async (req, res) => {
-  const workout = await Workout.findById(req.params.id).populate(
-    "exercises.exerciseId"
-  );
+  const workout = await prisma.workout.findUnique({
+    where: { id: req.params.id },
+    include: {
+      exercises: {
+        include: {
+          exercise: true
+        },
+        orderBy: { order: 'asc' }
+      }
+    }
+  });
 
   if (!workout) {
     return errorResponse(res, 404, "Workout not found");
@@ -52,7 +71,7 @@ export const getWorkout = asyncHandler(async (req, res) => {
 
   // Check if user owns the workout
   if (
-    workout.userId.toString() !== req.user._id.toString() &&
+    workout.userId !== req.user.id &&
     !workout.isPublic
   ) {
     return errorResponse(res, 403, "Not authorized to access this workout");
@@ -67,12 +86,39 @@ export const getWorkout = asyncHandler(async (req, res) => {
  * @access  Private
  */
 export const createWorkout = asyncHandler(async (req, res) => {
-  const workoutData = {
-    ...req.body,
-    userId: req.user._id,
-  };
+  const {
+    name, description, category, difficulty, estimatedDuration,
+    tags, isTemplate, isPublic, exercises
+  } = req.body;
 
-  const workout = await Workout.create(workoutData);
+  const workout = await prisma.workout.create({
+    data: {
+      userId: req.user.id,
+      name,
+      description,
+      category: category || 'Custom',
+      difficulty: difficulty || 'Intermediate',
+      estimatedDuration: estimatedDuration || 60,
+      tags: tags || [],
+      isTemplate: isTemplate || false,
+      isPublic: isPublic || false,
+      exercises: {
+        create: exercises?.map(ex => ({
+          exerciseId: ex.exerciseId,
+          name: ex.name,
+          sets: ex.sets,
+          reps: ex.reps,
+          weight: ex.weight || 0,
+          restTime: ex.restTime || 60,
+          notes: ex.notes || "",
+          order: ex.order,
+        })) || []
+      }
+    },
+    include: {
+      exercises: true
+    }
+  });
 
   successResponse(res, 201, { workout }, "Workout created successfully");
 });
@@ -83,21 +129,81 @@ export const createWorkout = asyncHandler(async (req, res) => {
  * @access  Private
  */
 export const updateWorkout = asyncHandler(async (req, res) => {
-  let workout = await Workout.findById(req.params.id);
+  let workout = await prisma.workout.findUnique({
+    where: { id: req.params.id }
+  });
 
   if (!workout) {
     return errorResponse(res, 404, "Workout not found");
   }
 
   // Check ownership
-  if (workout.userId.toString() !== req.user._id.toString()) {
+  if (workout.userId !== req.user.id) {
     return errorResponse(res, 403, "Not authorized to update this workout");
   }
 
-  workout = await Workout.findByIdAndUpdate(req.params.id, req.body, {
-    new: true,
-    runValidators: true,
-  });
+  const {
+    name, description, category, difficulty, estimatedDuration,
+    tags, isTemplate, isPublic, exercises
+  } = req.body;
+
+  // For exercises, we delete and recreate to keep it simple, or we can use nested updates.
+  // Given the Mongoose logic, a full replacement is often what's expected for arrays.
+
+  const updateData = {
+    name,
+    description,
+    category,
+    difficulty,
+    estimatedDuration,
+    tags,
+    isTemplate,
+    isPublic,
+  };
+
+  // Remove undefined
+  Object.keys(updateData).forEach(key => updateData[key] === undefined && delete updateData[key]);
+
+  if (exercises) {
+    // Transaction to update workout and its exercises
+    workout = await prisma.$transaction(async (tx) => {
+      // Delete existing exercises
+      await tx.workoutExercise.deleteMany({
+        where: { workoutId: req.params.id }
+      });
+
+      // Update workout and create new exercises
+      return await tx.workout.update({
+        where: { id: req.params.id },
+        data: {
+          ...updateData,
+          exercises: {
+            create: exercises.map(ex => ({
+              exerciseId: ex.exerciseId,
+              name: ex.name,
+              sets: ex.sets,
+              reps: ex.reps,
+              weight: ex.weight || 0,
+              restTime: ex.restTime || 60,
+              notes: ex.notes || "",
+              order: ex.order,
+            }))
+          }
+        },
+        include: {
+          exercises: true
+        }
+      });
+    });
+  } else {
+    workout = await prisma.workout.update({
+      where: { id: req.params.id },
+      data: updateData,
+      include: {
+        exercises: true
+      }
+    });
+  }
 
   successResponse(res, 200, { workout }, "Workout updated successfully");
 });
@@ -108,18 +214,22 @@ export const updateWorkout = asyncHandler(async (req, res) => {
  * @access  Private
  */
 export const deleteWorkout = asyncHandler(async (req, res) => {
-  const workout = await Workout.findById(req.params.id);
+  const workout = await prisma.workout.findUnique({
+    where: { id: req.params.id }
+  });
 
   if (!workout) {
     return errorResponse(res, 404, "Workout not found");
   }
 
   // Check ownership
-  if (workout.userId.toString() !== req.user._id.toString()) {
+  if (workout.userId !== req.user.id) {
     return errorResponse(res, 403, "Not authorized to delete this workout");
   }
 
-  await workout.deleteOne();
+  await prisma.workout.delete({
+    where: { id: req.params.id }
+  });
 
   successResponse(res, 200, {}, "Workout deleted successfully");
 });
@@ -130,27 +240,40 @@ export const deleteWorkout = asyncHandler(async (req, res) => {
  * @access  Private
  */
 export const addExerciseToWorkout = asyncHandler(async (req, res) => {
-  const workout = await Workout.findById(req.params.id);
+  const workout = await prisma.workout.findUnique({
+    where: { id: req.params.id },
+    include: { exercises: true }
+  });
 
   if (!workout) {
     return errorResponse(res, 404, "Workout not found");
   }
 
   // Check ownership
-  if (workout.userId.toString() !== req.user._id.toString()) {
+  if (workout.userId !== req.user.id) {
     return errorResponse(res, 403, "Not authorized to modify this workout");
   }
 
-  // Add exercise
-  const exercise = {
-    ...req.body,
-    order: workout.exercises.length + 1,
-  };
+  const newExercise = await prisma.workoutExercise.create({
+    data: {
+      workoutId: req.params.id,
+      exerciseId: req.body.exerciseId,
+      name: req.body.name,
+      sets: req.body.sets,
+      reps: req.body.reps,
+      weight: req.body.weight || 0,
+      restTime: req.body.restTime || 60,
+      notes: req.body.notes || "",
+      order: workout.exercises.length + 1,
+    }
+  });
 
-  workout.exercises.push(exercise);
-  await workout.save();
+  const updatedWorkout = await prisma.workout.findUnique({
+    where: { id: req.params.id },
+    include: { exercises: true }
+  });
 
-  successResponse(res, 200, { workout }, "Exercise added to workout");
+  successResponse(res, 200, { workout: updatedWorkout }, "Exercise added to workout");
 });
 
 /**
@@ -159,25 +282,29 @@ export const addExerciseToWorkout = asyncHandler(async (req, res) => {
  * @access  Private
  */
 export const removeExerciseFromWorkout = asyncHandler(async (req, res) => {
-  const workout = await Workout.findById(req.params.id);
+  const workout = await prisma.workout.findUnique({
+    where: { id: req.params.id },
+  });
 
   if (!workout) {
     return errorResponse(res, 404, "Workout not found");
   }
 
   // Check ownership
-  if (workout.userId.toString() !== req.user._id.toString()) {
+  if (workout.userId !== req.user.id) {
     return errorResponse(res, 403, "Not authorized to modify this workout");
   }
 
-  // Remove exercise
-  workout.exercises = workout.exercises.filter(
-    (ex) => ex._id.toString() !== req.params.exerciseId
-  );
+  await prisma.workoutExercise.delete({
+    where: { id: req.params.exerciseId }
+  });
 
-  await workout.save();
+  const updatedWorkout = await prisma.workout.findUnique({
+    where: { id: req.params.id },
+    include: { exercises: true }
+  });
 
-  successResponse(res, 200, { workout }, "Exercise removed from workout");
+  successResponse(res, 200, { workout: updatedWorkout }, "Exercise removed from workout");
 });
 
 /**
@@ -186,7 +313,10 @@ export const removeExerciseFromWorkout = asyncHandler(async (req, res) => {
  * @access  Private
  */
 export const duplicateWorkout = asyncHandler(async (req, res) => {
-  const originalWorkout = await Workout.findById(req.params.id);
+  const originalWorkout = await prisma.workout.findUnique({
+    where: { id: req.params.id },
+    include: { exercises: true }
+  });
 
   if (!originalWorkout) {
     return errorResponse(res, 404, "Workout not found");
@@ -194,24 +324,43 @@ export const duplicateWorkout = asyncHandler(async (req, res) => {
 
   // Check access
   if (
-    originalWorkout.userId.toString() !== req.user._id.toString() &&
+    originalWorkout.userId !== req.user.id &&
     !originalWorkout.isPublic
   ) {
     return errorResponse(res, 403, "Not authorized to access this workout");
   }
 
   // Create duplicate
-  const workoutData = originalWorkout.toObject();
-  delete workoutData._id;
-  delete workoutData.createdAt;
-  delete workoutData.updatedAt;
-
-  workoutData.name = `${workoutData.name} (Copy)`;
-  workoutData.userId = req.user._id;
-  workoutData.timesCompleted = 0;
-  workoutData.lastPerformed = null;
-
-  const duplicatedWorkout = await Workout.create(workoutData);
+  const duplicatedWorkout = await prisma.workout.create({
+    data: {
+      userId: req.user.id,
+      name: `${originalWorkout.name} (Copy)`,
+      description: originalWorkout.description,
+      category: originalWorkout.category,
+      difficulty: originalWorkout.difficulty,
+      estimatedDuration: originalWorkout.estimatedDuration,
+      tags: originalWorkout.tags,
+      isTemplate: false,
+      isPublic: false,
+      timesCompleted: 0,
+      lastPerformed: null,
+      exercises: {
+        create: originalWorkout.exercises.map(ex => ({
+          exerciseId: ex.exerciseId,
+          name: ex.name,
+          sets: ex.sets,
+          reps: ex.reps,
+          weight: ex.weight,
+          restTime: ex.restTime,
+          notes: ex.notes,
+          order: ex.order,
+        }))
+      }
+    },
+    include: {
+      exercises: true
+    }
+  });
 
   successResponse(
     res,

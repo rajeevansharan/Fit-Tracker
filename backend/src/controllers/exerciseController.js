@@ -4,7 +4,7 @@ import {
   errorResponse,
   paginate,
 } from "../utils/helpers.js";
-import Exercise from "../models/Exercise.js";
+import prisma from "../lib/prisma.js";
 
 /**
  * @desc    Get all exercises
@@ -15,29 +15,52 @@ export const getExercises = asyncHandler(async (req, res) => {
   const { page, limit, category, muscle, difficulty, equipment, search } =
     req.query;
 
-  const query = {};
-
-  // Show default exercises and user's custom exercises
-  query.$or = [
-    { isCustom: false },
-    { isCustom: true, createdBy: req.user._id },
-  ];
+  const where = {
+    OR: [
+      { isCustom: false },
+      { isCustom: true, userId: req.user.id },
+    ],
+  };
 
   // Filters
-  if (category) query.category = category;
-  if (muscle) query.muscle = muscle;
-  if (difficulty) query.difficulty = difficulty;
-  if (equipment) query.equipment = equipment;
+  if (category) where.category = category;
+  if (muscle) where.muscle = muscle;
+  if (difficulty) where.difficulty = difficulty;
+  if (equipment) where.equipment = equipment;
 
-  // Text search
+  // Search
   if (search) {
-    query.$text = { $search: search };
+    where.OR = where.OR.map(condition => ({
+      ...condition,
+      AND: [
+        {
+          OR: [
+            { name: { contains: search, mode: 'insensitive' } },
+            { description: { contains: search, mode: 'insensitive' } },
+          ]
+        }
+      ]
+    }));
+    // Actually, simpler:
+    where.AND = [
+      {
+        OR: [
+          { name: { contains: search, mode: 'insensitive' } },
+          { description: { contains: search, mode: 'insensitive' } },
+        ]
+      }
+    ];
   }
 
-  const result = await paginate(Exercise, query, {
+  const result = await paginate(prisma.exercise, {
+    where,
+    orderBy: [
+      { usageCount: 'desc' },
+      { createdAt: 'desc' },
+    ],
+  }, {
     page,
     limit,
-    sort: "-usageCount -createdAt",
   });
 
   res.status(200).json(result);
@@ -49,7 +72,9 @@ export const getExercises = asyncHandler(async (req, res) => {
  * @access  Private
  */
 export const getExercise = asyncHandler(async (req, res) => {
-  const exercise = await Exercise.findById(req.params.id);
+  const exercise = await prisma.exercise.findUnique({
+    where: { id: req.params.id }
+  });
 
   if (!exercise) {
     return errorResponse(res, 404, "Exercise not found");
@@ -58,7 +83,7 @@ export const getExercise = asyncHandler(async (req, res) => {
   // Check access for custom exercises
   if (
     exercise.isCustom &&
-    exercise.createdBy?.toString() !== req.user._id.toString()
+    exercise.userId !== req.user.id
   ) {
     return errorResponse(res, 403, "Not authorized to access this exercise");
   }
@@ -72,13 +97,28 @@ export const getExercise = asyncHandler(async (req, res) => {
  * @access  Private
  */
 export const createExercise = asyncHandler(async (req, res) => {
-  const exerciseData = {
-    ...req.body,
-    isCustom: true,
-    createdBy: req.user._id,
-  };
+  const {
+    name, description, category, muscle, secondaryMuscles,
+    equipment, difficulty, instructions, tips, videoUrl, imageUrl
+  } = req.body;
 
-  const exercise = await Exercise.create(exerciseData);
+  const exercise = await prisma.exercise.create({
+    data: {
+      name,
+      description,
+      category,
+      muscle,
+      secondaryMuscles: secondaryMuscles || [],
+      equipment,
+      difficulty: difficulty || 'Intermediate',
+      instructions: instructions || [],
+      tips: tips || [],
+      videoUrl,
+      imageUrl,
+      isCustom: true,
+      userId: req.user.id,
+    },
+  });
 
   successResponse(res, 201, { exercise }, "Exercise created successfully");
 });
@@ -89,7 +129,9 @@ export const createExercise = asyncHandler(async (req, res) => {
  * @access  Private
  */
 export const updateExercise = asyncHandler(async (req, res) => {
-  let exercise = await Exercise.findById(req.params.id);
+  let exercise = await prisma.exercise.findUnique({
+    where: { id: req.params.id }
+  });
 
   if (!exercise) {
     return errorResponse(res, 404, "Exercise not found");
@@ -98,14 +140,14 @@ export const updateExercise = asyncHandler(async (req, res) => {
   // Only allow updating custom exercises created by the user
   if (
     !exercise.isCustom ||
-    exercise.createdBy?.toString() !== req.user._id.toString()
+    exercise.userId !== req.user.id
   ) {
     return errorResponse(res, 403, "Not authorized to update this exercise");
   }
 
-  exercise = await Exercise.findByIdAndUpdate(req.params.id, req.body, {
-    new: true,
-    runValidators: true,
+  exercise = await prisma.exercise.update({
+    where: { id: req.params.id },
+    data: req.body,
   });
 
   successResponse(res, 200, { exercise }, "Exercise updated successfully");
@@ -117,7 +159,9 @@ export const updateExercise = asyncHandler(async (req, res) => {
  * @access  Private
  */
 export const deleteExercise = asyncHandler(async (req, res) => {
-  const exercise = await Exercise.findById(req.params.id);
+  const exercise = await prisma.exercise.findUnique({
+    where: { id: req.params.id }
+  });
 
   if (!exercise) {
     return errorResponse(res, 404, "Exercise not found");
@@ -126,12 +170,14 @@ export const deleteExercise = asyncHandler(async (req, res) => {
   // Only allow deleting custom exercises created by the user
   if (
     !exercise.isCustom ||
-    exercise.createdBy?.toString() !== req.user._id.toString()
+    exercise.userId !== req.user.id
   ) {
     return errorResponse(res, 403, "Not authorized to delete this exercise");
   }
 
-  await exercise.deleteOne();
+  await prisma.exercise.delete({
+    where: { id: req.params.id }
+  });
 
   successResponse(res, 200, {}, "Exercise deleted successfully");
 });
@@ -142,7 +188,12 @@ export const deleteExercise = asyncHandler(async (req, res) => {
  * @access  Private
  */
 export const getCategories = asyncHandler(async (req, res) => {
-  const categories = await Exercise.distinct("category");
+  const categoriesData = await prisma.exercise.findMany({
+    select: { category: true },
+    distinct: ['category'],
+  });
+
+  const categories = categoriesData.map(c => c.category);
 
   successResponse(res, 200, { categories }, "Categories retrieved");
 });
@@ -153,7 +204,12 @@ export const getCategories = asyncHandler(async (req, res) => {
  * @access  Private
  */
 export const getMuscleGroups = asyncHandler(async (req, res) => {
-  const muscles = await Exercise.distinct("muscle");
+  const musclesData = await prisma.exercise.findMany({
+    select: { muscle: true },
+    distinct: ['muscle'],
+  });
+
+  const muscles = musclesData.map(m => m.muscle);
 
   successResponse(res, 200, { muscles }, "Muscle groups retrieved");
 });
@@ -164,7 +220,12 @@ export const getMuscleGroups = asyncHandler(async (req, res) => {
  * @access  Private
  */
 export const getEquipment = asyncHandler(async (req, res) => {
-  const equipment = await Exercise.distinct("equipment");
+  const equipmentData = await prisma.exercise.findMany({
+    select: { equipment: true },
+    distinct: ['equipment'],
+  });
+
+  const equipment = equipmentData.map(e => e.equipment);
 
   successResponse(res, 200, { equipment }, "Equipment types retrieved");
 });

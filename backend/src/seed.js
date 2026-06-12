@@ -1,6 +1,5 @@
 import dotenv from "dotenv";
-import connectDB from "./config/database.js";
-import Exercise from "./models/Exercise.js";
+import prisma from "./lib/prisma.js";
 
 dotenv.config();
 
@@ -208,23 +207,35 @@ const exercises = [
 
 const seedDatabase = async () => {
   try {
-    await connectDB();
+    console.log("🌱 Connect to database...");
+    await prisma.$connect();
 
     console.log("🌱 Seeding database...");
 
     // Clear existing exercises
-    await Exercise.deleteMany({ isCustom: false });
+    await prisma.exercise.deleteMany({ where: { isCustom: false } });
     console.log("✅ Cleared existing default exercises");
 
     // Insert exercises
-    await Exercise.insertMany(exercises);
-    console.log(`✅ Added ${exercises.length} default exercises`);
+    for (const ex of exercises) {
+      await prisma.exercise.upsert({
+        where: { name: ex.name },
+        update: ex,
+        create: {
+          ...ex,
+          isCustom: false,
+        },
+      });
+    }
+    console.log(`✅ Seeded ${exercises.length} default exercises`);
 
     console.log("🎉 Database seeded successfully!");
     process.exit(0);
   } catch (error) {
     console.error("❌ Error seeding database:", error);
     process.exit(1);
+  } finally {
+    await prisma.$disconnect();
   }
 };
 

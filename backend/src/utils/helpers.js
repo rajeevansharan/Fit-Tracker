@@ -8,27 +8,24 @@ export const asyncHandler = (fn) => (req, res, next) => {
 };
 
 /**
- * Create paginated response
- * @param {Object} model - Mongoose model
- * @param {Object} query - Query object
+ * Create paginated response for Prisma
+ * @param {Object} prismaModel - Prisma model delegate (e.g., prisma.user)
+ * @param {Object} args - Prisma findMany arguments (where, include, etc.)
  * @param {Object} options - Pagination options
  */
-export const paginate = async (model, query = {}, options = {}) => {
+export const paginate = async (prismaModel, args = {}, options = {}) => {
   const page = parseInt(options.page, 10) || 1;
   const limit = parseInt(options.limit, 10) || 10;
-  const sort = options.sort || "-createdAt";
-  const populate = options.populate || "";
 
-  const startIndex = (page - 1) * limit;
-  const endIndex = page * limit;
-  const total = await model.countDocuments(query);
+  const skip = (page - 1) * limit;
+  const total = await prismaModel.count({ where: args.where || {} });
 
-  const results = await model
-    .find(query)
-    .populate(populate)
-    .sort(sort)
-    .limit(limit)
-    .skip(startIndex);
+  const results = await prismaModel.findMany({
+    ...args,
+    take: limit,
+    skip: skip,
+    orderBy: args.orderBy || { createdAt: 'desc' },
+  });
 
   const pagination = {
     current: page,
@@ -36,6 +33,9 @@ export const paginate = async (model, query = {}, options = {}) => {
     total,
     totalPages: Math.ceil(total / limit),
   };
+
+  const startIndex = skip;
+  const endIndex = page * limit;
 
   if (endIndex < total) {
     pagination.next = page + 1;
@@ -110,10 +110,12 @@ export const calculateWorkoutVolume = (exercises) => {
  * @param {Date} date2
  */
 export const isSameDay = (date1, date2) => {
+  const d1 = new Date(date1);
+  const d2 = new Date(date2);
   return (
-    date1.getFullYear() === date2.getFullYear() &&
-    date1.getMonth() === date2.getMonth() &&
-    date1.getDate() === date2.getDate()
+    d1.getFullYear() === d2.getFullYear() &&
+    d1.getMonth() === d2.getMonth() &&
+    d1.getDate() === d2.getDate()
   );
 };
 

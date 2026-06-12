@@ -94,21 +94,20 @@ const PORT = process.env.PORT || 5000;
 
 const server = app.listen(PORT, () => {
   console.log(`
-╔═══════════════════════════════════════════════════════════╗
-║                                                           ║
-║         🏋️  FitTracker API Server Running 🏋️              ║
-║                                                           ║
-║  Environment: ${
-    process.env.NODE_ENV?.toUpperCase() || "DEVELOPMENT"
-  }                                    ║
-║  Port: ${PORT}                                              ║
-║  Database: Connected                                      ║
-║                                                           ║
-╚═══════════════════════════════════════════════════════════╝
+╔══════════════════════════════════════════════════════════════════════╗
+║                                                                      ║
+║         🏋️  FitTracker API Server Running 🏋️                        ║
+║                                                                      ║
+║  Environment: ${process.env.NODE_ENV?.toUpperCase() || "DEVELOPMENT"
+  }                                                                    ║
+║  Port: ${PORT}                                                       ║
+║  Database: PostgreSQL (via Prisma)                                   ║
+║                                                                      ║
+╚══════════════════════════════════════════════════════════════════════╝
   `);
 });
 
-// Handle unhandled promise rejections
+// Handle unhandled promise rejections  
 process.on("unhandledRejection", (err, promise) => {
   console.log(`Error: ${err.message}`);
   // Close server & exit process
